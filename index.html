@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>$BONK Buy Timer</title>
+  <script src="https://unpkg.com/@solana/web3.js@1.95.3"></script>
+  <script src="https://unpkg.com/borsh@0.7.0"></script> <!-- Note: May need local install for production -->
+</head>
+<body>
+  <h1>Game Timer</h1>
+  <div id="timer">60:00</div>
+  <p>Resets on any $BONK buy (1+ token).</p>
+
+  <script>
+    // Solana setup
+    const { Connection, PublicKey } = solanaWeb3;
+    const Borsh = borsh;
+
+    const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed'); // Replace with Helius for better performance
+
+    const poolAddress = new PublicKey('HVNwzt7Pxfu76KHCMQPTLuTCLTm6WnQ1esLv4eizseSv');
+
+    // Borsh schema for Raydium LiquidityStateV4 (key fields for swap detection)
+    const LiquidityStateV4 = Borsh.struct([
+      Borsh.u64('status'),
+      Borsh.u64('nonce'),
+      Borsh.u64('maxOrder'),
+      Borsh.u64('depth'),
+      Borsh.u64('baseDecimal'),
+      Borsh.u64('quoteDecimal'),
+      Borsh.u64('state'),
+      Borsh.u64('resetFlag'),
+      Borsh.u64('minSize'),
+      Borsh.u64('volMaxCutRatio'),
+      Borsh.u64('amountWaveRatio'),
+      Borsh.u64('baseLotSize'),
+      Borsh.u64('quoteLotSize'),
+      Borsh.u64('minPriceMultiplier'),
+      Borsh.u64('maxPriceMultiplier'),
+      Borsh.u64('systemDecimalValue'),
+      Borsh.u64('minSeparateNumerator'),
+      Borsh.u64('minSeparateDenominator'),
+      Borsh.u64('tradeFeeNumerator'),
+      Borsh.u64('tradeFeeDenominator'),
+      Borsh.u64('pnlNumerator'),
+      Borsh.u64('pnlDenominator'),
+      Borsh.u64('swapFeeNumerator'),
+      Borsh.u64('swapFeeDenominator'),
+      Borsh.u64('baseNeedTakePnl'),
+      Borsh.u64('quoteNeedTakePnl'),
+      Borsh.u64('quoteTotalPnl'),
+      Borsh.u64('baseTotalPnl'),
+      Borsh.u128('quoteTotalDeposited'),
+      Borsh.u128('baseTotalDeposited'),
+      Borsh.u128('swapBaseInAmount'),
+      Borsh.u128('swapQuoteOutAmount'),
+      Borsh.u64('swapBase2QuoteFee'),
+      Borsh.u128('swapQuoteInAmount'),
+      Borsh.u128('swapBaseOutAmount'),
+      Borsh.u64('swapQuote2BaseFee'),
+      Borsh.publicKey('baseVault'),
+      Borsh.publicKey('quoteVault'),
+      Borsh.u64('rewardLastUpdatedTimestamp'),
+      // Reward infos (array of 5 structs; simplified - adjust if needed)
+      Borsh.vec(Borsh.struct([
+        Borsh.publicKey('rewardTokenMint'),
+        Borsh.publicKey('rewardVault'),
+        Borsh.u128('rewardPerLpToken'),
+        Borsh.u64('rewardLastUpdatedTimestamp'),
+      ])),
+      Borsh.publicKey('baseMint'),
+      Borsh.publicKey('quoteMint'),
+      Borsh.publicKey('lpMint'),
+      Borsh.publicKey('openOrders'),
+      Borsh.publicKey('marketId'),
+      Borsh.publicKey('marketProgramId'),
+      Borsh.publicKey('targetOrders'),
+      Borsh.publicKey('withdrawQueue'),
+      Borsh.publicKey('lpVault'),
+      Borsh.publicKey('owner'),
+      Borsh.u64('lpReserve'),
+    ]);
+
+    let previousSwapQuoteInAmount = BigInt(0); // Initial value
+
+    // Subscribe to pool account changes
+    const subscriptionId = connection.onAccountChange(poolAddress, (accountInfo) => {
+      try {
+        const decoded = LiquidityStateV4.deserialize(accountInfo.data);
+        const currentSwapQuoteInAmount = decoded.swapQuoteInAmount; // BigInt
+
+        if (currentSwapQuoteInAmount > previousSwapQuoteInAmount) {
+          // Buy detected (quote in increased = SOL in, BONK out)
+          resetTimer();
+        }
+
+        previousSwapQuoteInAmount = currentSwapQuoteInAmount;
+      } catch (error) {
+        console.error('Decoding error:', error);
+      }
+    });
+
+    // Timer logic
+    let timeLeft = 3600; // 1 hour in seconds
+    const timerElement = document.getElementById('timer');
+
+    function updateTimer() {
+      const minutes = Math.floor(timeLeft / 60);
+      const seconds = timeLeft % 60;
+      timerElement.textContent = `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+
+      if (timeLeft > 0) {
+        timeLeft--;
+      } else {
+        // Game over logic (e.g., alert('Time\'s up!'));
+      }
+    }
+
+    function resetTimer() {
+      timeLeft = 3600;
+      updateTimer();
+      console.log('Timer reset on $BONK buy!');
+    }
+
+    // Start countdown
+    setInterval(updateTimer, 1000);
+    updateTimer(); // Initial display
+
+    // Optional: Fetch initial state to set previous value
+    (async () => {
+      const accountInfo = await connection.getAccountInfo(poolAddress);
+      if (accountInfo) {
+        const decoded = LiquidityStateV4.deserialize(accountInfo.data);
+        previousSwapQuoteInAmount = decoded.swapQuoteInAmount;
+      }
+    })();
+  </script>
+</body>
+</html>
