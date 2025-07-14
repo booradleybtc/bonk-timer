@@ -11,412 +11,28 @@
   <p>Resets on any $BONK buy (1+ token).</p>
 
   <script>
-    // Inline borsh code (browser-adapted from source)
-    (function(global) {
-      class BorshError extends Error {
-        constructor(message) {
-          super(message);
-          this.fieldPath = [];
-          this.indexPath = [];
-        }
-        addToFieldPath(field) {
-          this.fieldPath.splice(0, 0, field);
-          return this;
-        }
-        prependIndexPath(index) {
-          this.indexPath.splice(0, 0, index);
-          return this;
-        }
-      }
-
-      const BinaryWriter = class {
-        constructor() {
-          this.buf = new Uint8Array(1024);
-          this.length = 0;
-          this.pos = 0;
-        }
-        maybeResize() {
-          if (this.pos + 16 >= this.length) {
-            this.length *= 2;
-            let newBuf = new Uint8Array(this.length);
-            newBuf.set(this.buf);
-            this.buf = newBuf;
-          }
-        }
-        writeU8(value) {
-          this.maybeResize();
-          this.buf[this.pos++] = value;
-        }
-        writeU16(value) {
-          this.maybeResize();
-          this.buf[this.pos++] = value;
-          this.buf[this.pos++] = value >> 8;
-        }
-        writeU32(value) {
-          this.maybeResize();
-          this.buf[this.pos++] = value;
-          this.buf[this.pos++] = value >> 8;
-          this.buf[this.pos++] = value >> 16;
-          this.buf[this.pos++] = value >> 24;
-        }
-        writeU64(value) {
-          this.maybeResize();
-          let low = Number(BigInt.asUintN(32, value));
-          let high = Number(BigInt.asUintN(32, value >> 32n));
-          this.buf[this.pos++] = low;
-          this.buf[this.pos++] = low >> 8;
-          this.buf[this.pos++] = low >> 16;
-          this.buf[this.pos++] = low >> 24;
-          this.buf[this.pos++] = high;
-          this.buf[this.pos++] = high >> 8;
-          this.buf[this.pos++] = high >> 16;
-          this.buf[this.pos++] = high >> 24;
-        }
-        writeU128(value) {
-          this.writeU64(BigInt.asUintN(64, value));
-          this.writeU64(BigInt.asUintN(64, value >> 64n));
-        }
-        slice() {
-          return this.buf.subarray(0, this.pos);
-        }
-        writeString(str) {
-          let bytes = new TextEncoder().encode(str);
-          this.writeU32(bytes.length);
-          this.maybeResize();
-          this.buf.set(bytes, this.pos);
-          this.pos += bytes.length;
-        }
-        writeFixedArray(array) {
-          for (let item of array) {
-            this.writeU8(item);
-          }
-        }
-        writeArray(array, fn) {
-          this.writeU32(array.length);
-          for (let item of array) {
-            fn.call(this, item);
-          }
-        }
-      };
-
-      const BinaryReader = class {
-        constructor(buf) {
-          this.buf = buf;
-          this.pos = 0;
-        }
-        readU8() {
-          return this.buf[this.pos++];
-        }
-        readU16() {
-          let a = this.buf[this.pos++];
-          let b = this.buf[this.pos++];
-          return a | (b << 8);
-        }
-        readU32() {
-          let a = this.buf[this.pos++];
-          let b = this.buf[this.pos++];
-          let c = this.buf[this.pos++];
-          let d = this.buf[this.pos++];
-          return a | (b << 8) | (c << 16) | (d << 24);
-        }
-        readU64() {
-          let a = BigInt(this.readU32());
-          let b = BigInt(this.readU32());
-          return a | (b << 32n);
-        }
-        readU128() {
-          let a = this.readU64();
-          let b = this.readU64();
-          return a | (b << 64n);
-        }
-        readString() {
-          let len = this.readU32();
-          let bytes = this.buf.subarray(this.pos, this.pos + len);
-          this.pos += len;
-          return new TextDecoder().decode(bytes);
-        }
-        readFixedArray(len) {
-          let arr = new Uint8Array(len);
-          for (let i = 0; i < len; i++) {
-            arr[i] = this.readU8();
-          }
-          return arr;
-        }
-        readArray(fn) {
-          let len = this.readU32();
-          let arr = [];
-          for (let i = 0; i < len; i++) {
-            arr.push(fn.call(this));
-          }
-          return arr;
-        }
-      };
-
-      function capitalizeFirstCharacter(s) {
-        return s.charAt(0).toUpperCase() + s.slice(1);
-      }
-
-      function baseEncode(value) {
-        if (typeof value === 'string') {
-          value = new TextEncoder().encode(value);
-        }
-        let view = new DataView(value.buffer, value.byteOffset, value.byteLength);
-        let chars = [];
-        for (let i = 0; i < value.length; i++) {
-          chars.push(view.getUint8(i));
-        }
-        return btoa(String.fromCharCode.apply(null, chars));
-      }
-
-      function baseDecode(value) {
-        let chars = atob(value).split('');
-        let bytes = new Uint8Array(chars.length);
-        for (let i = 0; i < chars.length; i++) {
-          bytes[i] = chars[i].charCodeAt(0);
-        }
-        return bytes;
-      }
-
-      function serializeField(schema, value, fieldType, writer) {
-        try {
-          if (typeof fieldType === 'string') {
-            writer[`write${capitalizeFirstCharacter(fieldType)}`](value);
-          } else if (fieldType instanceof Array) {
-            if (typeof value === 'string') {
-              writer.writeU32(value.length);
-              writer.writeFixedArray(new TextEncoder().encode(value));
-            } else if (value.length != fieldType[1]) {
-              throw new BorshError(`Expecting fixed array of ${fieldType[1]} elements`);
-            } else {
-              writer.writeFixedArray(value);
-            }
-          } else if (fieldType.kind === 'array') {
-            writer.writeArray(value, (item) => {
-              serializeField(schema, item, fieldType.type, writer);
-            });
-          } else if (fieldType.kind === 'option') {
-            if (value === null || value === undefined) {
-              writer.writeU8(0);
-            } else {
-              writer.writeU8(1);
-              serializeField(schema, value, fieldType.type, writer);
-            }
-          } else if (fieldType.kind === 'map') {
-            writer.writeU32(value.size);
-            value.forEach((val, key) => {
-              serializeField(schema, key, fieldType.key, writer);
-              serializeField(schema, val, fieldType.value, writer);
-            });
-          } else if (typeof fieldType === 'object') {
-            serialize(schema, value, writer);
-          } else if (fieldType.kind === 'struct') {
-            serializeStruct(schema, fieldType, value, writer);
-          } else if (fieldType.kind === 'enum') {
-            serializeEnum(schema, fieldType, value, writer);
-          } else {
-            throw new BorshError(`Unexpected schema type: ${fieldType}`);
-          }
-        } catch (error) {
-          if (error instanceof BorshError) {
-            error.addToFieldPath(fieldType);
-          }
-          throw error;
-        }
-      }
-
-      function serializeStruct(schema, fieldType, obj, writer) {
-        const structSchema = schema.get(fieldType.type);
-        if (!structSchema) {
-          throw new BorshError(`Class ${fieldType.type} is missing in schema`);
-        }
-        if (structSchema.kind === 'struct') {
-          structSchema.fields.map(([fieldName, fieldType]) => {
-            const value = obj[fieldName];
-            serializeField(schema, value, fieldType, writer);
-          });
-        } else if (structSchema.kind === 'enum') {
-          const name = obj[structSchema.field];
-          let fieldIndex = -1;
-          for (let i = 0; i < structSchema.variants.length; i++) {
-            const variant = structSchema.variants[i];
-            if (variant.name === name) {
-              fieldIndex = i;
-              break;
-            }
-          }
-          if (fieldIndex === -1) {
-            throw new BorshError(`Enum variant '${name}' is not found`);
-          }
-          writer.writeU8(fieldIndex);
-          structSchema.variants[fieldIndex].fields?.forEach(([fieldName, fieldType]) => {
-            const value = obj[fieldName];
-            serializeField(schema, value, fieldType, writer);
-          });
-        } else {
-          throw new BorshError(`Unexpected schema kind: ${structSchema.kind} for ${fieldType.type}`);
-        }
-      }
-
-      function serialize(schema, obj, writer = new BinaryWriter()) {
-        const fieldType = schema.get(obj.constructor);
-        serializeStruct(schema, {type: obj.constructor.name, ...fieldType}, obj, writer);
-        return writer.slice();
-      }
-
-      function deserializeField(schema, fieldType, reader) {
-        try {
-          if (typeof fieldType === 'string') {
-            return reader[`read${capitalizeFirstCharacter(fieldType)}`]();
-          } else if (fieldType instanceof Array) {
-            if (fieldType[0] === 'u8') {
-              return new TextDecoder().decode(reader.readFixedArray(fieldType[1]));
-            } else {
-              throw new BorshError(`Unexpected fixed array type ${fieldType[0]}`);
-            }
-          } else if (fieldType.kind === 'array') {
-            return reader.readArray(() => deserializeField(schema, fieldType.type, reader));
-          } else if (fieldType.kind === 'option') {
-            const option = reader.readU8();
-            if (option) {
-              return deserializeField(schema, fieldType.type, reader);
-            }
-            return null;
-          } else if (fieldType.kind === 'map') {
-            let map = new Map();
-            const length = reader.readU32();
-            for (let i = 0; i < length; i++) {
-              const key = deserializeField(schema, fieldType.key, reader);
-              const val = deserializeField(schema, fieldType.value, reader);
-              map.set(key, val);
-            }
-            return map;
-          } else if (typeof fieldType === 'object') {
-            return deserialize(schema, fieldType.type, reader);
-          } else if (fieldType.kind === 'struct') {
-            return deserializeStruct(schema, fieldType.type, reader);
-          } else if (fieldType.kind === 'enum') {
-            return deserializeEnum(schema, fieldType.type, reader);
-          }
-          throw new BorshError(`Unexpected field type: ${fieldType}`);
-        } catch (error) {
-          if (error instanceof BorshError) {
-            error.prependIndexPath(reader.pos);
-          }
-          throw error;
-        }
-      }
-
-      function deserializeStruct(schema, classType, reader) {
-        const structSchema = schema.get(classType);
-        if (!structSchema) {
-          throw new BorshError(`Class ${classType} is missing in schema`);
-        }
-        if (structSchema.kind === 'struct') {
-          let result = {};
-          for (const [fieldName, fieldType] of structSchema.fields) {
-            result[fieldName] = deserializeField(schema, fieldType, reader);
-          }
-          return new classType(result);
-        } else if (structSchema.kind === 'enum') {
-          const idx = reader.readU8();
-          if (idx >= structSchema.variants.length) throw new BorshError(`Enum variant index ${idx} is out of range`);
-          const variant = structSchema.variants[idx];
-          let result = { [variant.name]: true };
-          if (variant.fields) {
-            for (const [fieldName, fieldType] of variant.fields) {
-              result[fieldName] = deserializeField(schema, fieldType, reader);
-            }
-          }
-          return result;
-        } else {
-          throw new BorshError(`Unexpected schema kind: ${structSchema.kind} for ${classType}`);
-        }
-      }
-
-      function deserialize(schema, classType, reader) {
-        const obj = deserializeStruct(schema, classType, reader);
-        return obj;
-      }
-
-      global.borsh = { BorshError, BinaryWriter, BinaryReader, baseEncode, baseDecode, serialize, deserialize };
-    })(window || globalThis);
-
-    const borsh = window.borsh; // Now use borsh as global
-
     // Solana setup (using global solanaWeb3 from IIFE)
     const { Connection, PublicKey } = solanaWeb3;
 
-    const connection = new Connection('https://mainnet.helius-rpc.com/?api-key=466f06cf-0f8e-4f05-9c46-a95cb4a83f67', 'confirmed'); // Replace with your key
+    const connection = new Connection('https://mainnet.helius-rpc.com/?apiUS-key=466f06cf-0f8e-4f05-9c46-a95cb4a83f67', 'confirmed'); // Use https:// for connection
 
-    const poolAddress = new PublicKey('HVNwzt7Pxfu76KHCMQPTLuTCLTm6WnQ1esLv4eizseSv');
-
-    // Borsh schema for Raydium LiquidityStateV4 (simplified to key fields)
-    const LiquidityStateV4 = borsh.struct([
-      borsh.u64('status'),
-      borsh.u64('nonce'),
-      borsh.u64('maxOrder'),
-      borsh.u64('depth'),
-      borsh.u64('baseDecimal'),
-      borsh.u64('quoteDecimal'),
-      borsh.u64('state'),
-      borsh.u64('resetFlag'),
-      borsh.u64('minSize'),
-      borsh.u64('volMaxCutRatio'),
-      borsh.u64('amountWaveRatio'),
-      borsh.u64('baseLotSize'),
-      borsh.u64('quoteLotSize'),
-      borsh.u64('minPriceMultiplier'),
-      borsh.u64('maxPriceMultiplier'),
-      borsh.u64('systemDecimalValue'),
-      borsh.u64('minSeparateNumerator'),
-      borsh.u64('minSeparateDenominator'),
-      borsh.u64('tradeFeeNumerator'),
-      borsh.u64('tradeFeeDenominator'),
-      borsh.u64('pnlNumerator'),
-      borsh.u64('pnlDenominator'),
-      borsh.u64('swapFeeNumerator'),
-      borsh.u64('swapFeeDenominator'),
-      borsh.u64('baseNeedTakePnl'),
-      borsh.u64('quoteNeedTakePnl'),
-      borsh.u64('quoteTotalPnl'),
-      borsh.u64('baseTotalPnl'),
-      borsh.u128('quoteTotalDeposited'),
-      borsh.u128('baseTotalDeposited'),
-      borsh.u128('swapBaseInAmount'),
-      borsh.u128('swapQuoteOutAmount'),
-      borsh.u64('swapBase2QuoteFee'),
-      borsh.u128('swapQuoteInAmount'),
-      borsh.u128('swapBaseOutAmount'),
-      borsh.u64('swapQuote2BaseFee'),
-      borsh.publicKey('baseVault'),
-      borsh.publicKey('quoteVault'),
-      borsh.u64('rewardLastUpdatedTimestamp'),
-      borsh.vec(borsh.struct([
-        borsh.publicKey('rewardTokenMint'),
-        borsh.publicKey('rewardVault'),
-        borsh.u128('rewardPerLpToken'),
-        borsh.u64('rewardLastUpdatedTimestamp'),
-      ])),
-      borsh.publicKey('baseMint'),
-      borsh.publicKey('quoteMint'),
-      borsh.publicKey('lpMint'),
-      borsh.publicKey('openOrders'),
-      borsh.publicKey('marketId'),
-      borsh.publicKey('marketProgramId'),
-      borsh.publicKey('targetOrders'),
-      borsh.publicKey('withdrawQueue'),
-      borsh.publicKey('lpVault'),
-      borsh.publicKey('owner'),
-      borsh.u64('lpReserve'),
-    ]);
+    const poolAddress = new PublicKey('9xQBiRMYECzrvGtgKyEUi1TmT9pZgNKNASt3gnezFDyx');
 
     let previousSwapQuoteInAmount = BigInt(0);
+
+    // Function to read u128 LE from DataView at offset
+    function readU128LE(dv, offset) {
+      const low = BigInt(dv.getUint32(offset, true)) | (BigInt(dv.getUint32(offset + 4, true)) << 32n);
+      const high = BigInt(dv.getUint32(offset + 8, true)) | (BigInt(dv.getUint32(offset + 12, true)) << 32n);
+      return low | (high << 64n);
+    }
 
     // Subscribe to pool changes
     const subscriptionId = connection.onAccountChange(poolAddress, (accountInfo) => {
       try {
-        const decoded = LiquidityStateV4.deserialize(accountInfo.data);
-        const currentSwapQuoteInAmount = decoded.swapQuoteInAmount;
+        const data = accountInfo.data;
+        const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        const currentSwapQuoteInAmount = readU128LE(dv, 296); // Offset for swapQuoteInAmount
 
         if (currentSwapQuoteInAmount > previousSwapQuoteInAmount) {
           resetTimer();
@@ -425,7 +41,7 @@
 
         previousSwapQuoteInAmount = currentSwapQuoteInAmount;
       } catch (error) {
-        console.error('Decoding error:', error);
+        console.error('Processing error:', error);
       }
     });
 
@@ -459,8 +75,9 @@
       try {
         const accountInfo = await connection.getAccountInfo(poolAddress);
         if (accountInfo) {
-          const decoded = LiquidityStateV4.deserialize(accountInfo.data);
-          previousSwapQuoteInAmount = decoded.swapQuoteInAmount;
+          const data = accountInfo.data;
+          const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+          previousSwapQuoteInAmount = readU128LE(dv, 296);
           console.log('Initial pool state loaded.');
         }
       } catch (error) {
